@@ -3,6 +3,9 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const {auth} = require("googleapis/build/src/apis/dlp");
 const { google } = require('googleapis');
+const cron = require("node-cron");
+const {Base64} = require('js-base64');
+const HTMLParser = require('node-html-parser');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -32,37 +35,50 @@ async function getMails(pageToken){
 
     const relist = await gmail.users.messages.list({
         userId: 'me',
-        maxResults: 10,
-        pageToken: pageToken
+        maxResults: 20,
+        // pageToken: pageToken
     });
 
-    console.log(relist.data.messages, "list");
+
+    // console.log(relist, "list");
 
     let mailList = []
     for (let i = 0; i < relist.data.messages.length; i++){
         const message = relist.data.messages[i];
-        console.log(message, "message")
+        // console.log(message, "message")
         const msg = await gmail.users.messages.get({
             userId: 'me',
             id: message.id,
             format: "full"
         });
-        console.log(msg.data, "msg")
+        // console.log(msg.data, "msg")
         mailList.push(msg.data)
     }
 
-    console.log(mailList, "mailList")
+    // console.log(mailList, "mailList")
 
-    return {list: mailList}
+    return {
+        list: mailList,
+        nextPageToken: relist.data.nextPageToken,
+        resultSizeEstimate: relist.data.resultSizeEstimate
+    }
 }
+
 
 router.post('/auth', async (req, res) => {
     const code = req.body?.code;
     console.log(req.body)
 
-    if(code === "none"){
+    // if(!oauth2Client){
+    //     const result = await fetchGoogleData(); // Replace with your actual Google API function
+    //
+    //     res.json({redirectUrl: result});
+    // }
+
+    if(oauth2Client){
         console.log("inside if")
-        res.json(await getMails(""))
+        console.log(req.body?.pageToken, "pagetoken")
+        res.json(await getMails(req.body?.pageToken))
     }
     else {
 
@@ -71,10 +87,10 @@ router.post('/auth', async (req, res) => {
         oauth2Client.setCredentials(tokens);
 
         // gapiLoaded()
-        res.json(await getMails(""))
+        console.log(req.body?.pageToken, "pagetoken")
+        res.json(await getMails(req.body?.pageToken))
     }
 });
-
 
 
 // Route for handling Google API requests
@@ -121,5 +137,249 @@ const fetchGoogleData = async () => {
 
     return authorizationUrl;
 };
+
+
+let historyId = 0;
+let cronInProgress = false;
+
+function getHeadersData(headers, value){
+    if (!headers || headers === []){
+        return ""
+    }
+
+    // console.log(headers, "headers")
+    for (let i = 0; i < headers.length; i++) {
+        const header = headers[i];
+        // console.log(header.name, "header")
+        // console.log(header.name === value)
+        if (header.name === value){
+            return header.value
+        }
+    }
+
+    return "empty"
+}
+
+function getDataFromParts(res){
+    let rawBody = res.payload?.parts
+    // console.log(rawBody)
+    if (!rawBody) return ""
+
+    let decodedBody = ""
+    for (let index = 0; index < rawBody.length; index++){
+        let item = rawBody[index]
+        // console.log(item)
+        // console.log(item.mimeType)
+        if(item.mimeType === "text/html"){
+            decodedBody = item.body.data;
+            break;
+        }
+        else if(item["mimeType"] === "text/plain"){
+            decodedBody = item.body.data;
+        }
+    }
+    // console.log(decodedBody);
+
+    return Base64.decode(decodedBody.replace(/-/g, '+').replace(/_/g, '/'));
+}
+
+function decodeMailBody(res){
+    let rawBody = res.payload.body?.data
+    if (!rawBody) return getDataFromParts(res)
+    
+    return Base64.decode(rawBody.replace(/-/g, '+').replace(/_/g, '/'));
+}
+
+function elementContainsText(element, text) {
+    return element.textContent.includes(text);
+}
+
+function getSku(url){
+    var match = url.match(/-([^\/]+)\.html/);
+
+    if (match && match[1]) {
+        return match[1].split('-').pop();
+    }
+    return null
+}
+
+function extractOrderAndTrackingInfo(decodedBody) {
+    // console.log(typeof(decodedBody))
+    console.log("extractOrderAndTrackingInfo")
+    const doc = HTMLParser.parse(decodedBody);
+    let paragraphs = doc.querySelectorAll('p');
+    let orderNumber = null;
+    let trackingNumber = null;
+
+    // Extract links
+    let orderLink = null;
+    let trackingLink = null;
+
+    if(paragraphs) {
+        // Initialize variables to store order and tracking elements
+        let orderElement = null;
+        let trackingElement = null;
+
+        // Iterate over the paragraphs and find the ones with specific content
+        paragraphs.forEach(function (paragraph) {
+            let content = paragraph.textContent.trim();
+            if (content.startsWith('Order #:')) {
+                orderElement = paragraph;
+            } else if (content.startsWith('Tracking #:')) {
+                trackingElement = paragraph;
+            }
+        });
+
+        // Extract order and tracking numbers
+        orderNumber = orderElement ? orderElement.textContent.trim().split(':')[1].trim() : null;
+        trackingNumber = trackingElement ? trackingElement.textContent.trim().split(':')[1].trim() : null;
+
+        // Extract links
+        orderLink = orderElement ? orderElement.querySelector('a').getAttribute('href') : null;
+        trackingLink = trackingElement ? trackingElement.querySelector('a').getAttribute('href') : null;
+
+        // Display the results
+        // console.log('Order Number:', orderNumber);
+        // console.log('Order Link:', orderLink);
+        // console.log('Tracking Number:', trackingNumber);
+        // console.log('Tracking Link:', trackingLink);
+    }
+
+    let strongElement = Array.from(doc.querySelectorAll('strong')).find(element => elementContainsText(element, 'Item(s) in this Shipment'));
+    let shippingOrderDetails = []
+
+    // Check if the <strong> element is found
+    if (strongElement) {
+        // Find the first <tr> ancestor with an "id" containing "Row"
+        // console.log(strongElement.outerHTML, "strongElEMENT")
+        let ancestorTr = strongElement.closest('tr[id*=Row]');
+        // console.log(ancestorTr.outerHTML, "ancestor")
+
+        // Check if the ancestor <tr> is found
+        if (ancestorTr) {
+            // Get the parent of the ancestor <tr>
+            let parentOfAncestor = ancestorTr.parentNode;
+            // console.log(parentOfAncestor.outerHTML, "parentOfAncestor")
+
+            // Iterate over all the siblings of the parent
+            let sibling = parentOfAncestor.nextElementSibling;
+            // console.log("sibling")
+
+            while (sibling) {
+                // console.log(sibling.outerHTML, "sibling")
+                let aElement = Array.from(sibling.querySelectorAll('a'))
+                if(!aElement) {
+                    sibling = sibling.nextElementSibling;
+                    continue;
+                }
+                let qtyElement = aElement.find(element => elementContainsText(element, 'Qty:'));
+                // console.log(qtyElement, "anchors")
+                // console.log(qtyElement.outerHTML, "qtyElement")
+
+
+                if(qtyElement){
+                    let spanValue = qtyElement.querySelector('span').textContent.trim();
+                    // console.log("Quantity : ", spanValue);
+                    // console.log("spanValue")
+
+                    let grandparents = qtyElement.parentNode.parentNode.parentNode;
+                    // console.log("grandparents", grandparents.outerHTML)
+
+                    let firstChild = grandparents.querySelector(':first-child');
+                    // console.log('First child of the great-grandparent:', firstChild.outerHTML);
+                    // console.log("firstChild")
+
+
+                    let hrefValue = firstChild.querySelector('a').getAttribute('href');
+                    let textContent = firstChild.textContent.trim();
+                    // console.log("textContent")
+
+                    // Display the results
+                    // console.log('Href:', hrefValue);
+                    // console.log('Text Content:', textContent);
+
+                    if (spanValue && hrefValue && textContent){
+                        shippingOrderDetails.push({
+                            "Quantity": spanValue,
+                            "sku": getSku(hrefValue),
+                            "title": textContent
+                        })
+                    }
+                }
+
+
+                // Move to the next sibling
+                sibling = sibling.nextElementSibling;
+            }
+        } else {
+            console.log('Ancestor <tr> with "Row" in id not found.');
+        }
+    } else {
+        console.log('Strong element not found.');
+    }
+
+    // console.log(shippingOrderDetails)
+
+    const reqBody = {
+        'Order Number:': orderNumber,
+        'Order Link:': orderLink,
+        'Tracking Number:': trackingNumber,
+        'Tracking Link:': trackingLink,
+        'shippingOrderDetails': shippingOrderDetails
+    }
+
+    console.log(reqBody, "ReqBody")
+
+}
+
+async function updateShippingCron(){
+
+    let pageToken = ""
+    let currentHistoryId = Number.MAX_SAFE_INTEGER;
+    while(currentHistoryId > historyId){
+        let mailData = await getMails(pageToken);
+        // pageToken = mailData.nextPageToken;
+
+        console.log(mailData.list.length)
+
+        for (let i = 0; i < mailData.list.length; i++){
+            let message = mailData.list[i];
+            // console.log(message, "message")
+
+            let mailFrom = getHeadersData(message.payload.headers, "From")
+
+            // console.log(mailFrom,"mailfrom")
+
+            if (mailFrom.includes("Orders @ Minoan")){
+                console.log(mailFrom)
+                const decodedBody = decodeMailBody(message)
+
+                // console.log(decodedBody)
+                if(decodedBody){
+                    extractOrderAndTrackingInfo(decodedBody)
+                }
+            }
+
+            // currentHistoryId = message.historyId;
+        }
+    }
+
+    // historyId = currentHistoryId;
+    // console.log(historyId);
+}
+
+
+
+cron.schedule("*/100  * * * * *", async function() {
+    console.log("running a task every 100 second");
+
+    if(!cronInProgress && oauth2Client !== null) {
+        console.log("begin cron")
+        cronInProgress = true
+        await updateShippingCron()
+        cronInProgress = false
+    }
+});
+
 
 module.exports = router;
