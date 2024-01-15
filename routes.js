@@ -98,7 +98,7 @@ router.get('/authorize', async (req, res) => {
     try {
         // Your Google API logic here
         if(oauth2Client){
-            res.json({ redirectUrl:  "https://834b-2405-201-4044-1078-5175-ae3c-c8b7-4654.ngrok-free.app/auth"});
+            res.json({ redirectUrl:  "https://minoan-gmail.minoanexperience.com/auth"});
         }
         else {
             const result = await fetchGoogleData(); // Replace with your actual Google API function
@@ -118,7 +118,7 @@ const fetchGoogleData = async () => {
     oauth2Client = new google.auth.OAuth2(
         CLIENT_ID,
         CLIENT_SECRET,
-        "https://834b-2405-201-4044-1078-5175-ae3c-c8b7-4654.ngrok-free.app/auth"
+        "https://minoan-gmail.minoanexperience.com/auth"
     );
 
 
